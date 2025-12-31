@@ -19,3 +19,15 @@ class Agent(Base):
     owner_id = Column(Integer, ForeignKey("users.id"))
 
     owner = relationship("User", back_populates="agents")
+
+class AgentCollaborator(Base):
+    __tablename__ = "agent_collaborators"
+
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id = Column(String, ForeignKey("agents.id"), index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    role = Column(String, default="viewer")  # 'viewer' or 'manager'
+
+    # optional relationships for convenience
+    user = relationship("User")
+    agent = relationship("Agent")

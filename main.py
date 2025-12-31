@@ -35,7 +35,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)"
+)
 
 # Dependency
 def get_db():
@@ -44,6 +44,23 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# Permissions helpers
+async def is_agent_owner(agent_id: str, user: models.User, db: Session) -> bool:
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id).first()
+    return agent is not None and agent.owner_id == user.id
+
+async def has_manage_permission(agent_id: str, user: models.User, db: Session) -> bool:
+    if await is_agent_owner(agent_id, user, db):
+        return True
+    collab = db.query(models.AgentCollaborator).filter(models.AgentCollaborator.agent_id == agent_id, models.AgentCollaborator.user_id == user.id).first()
+    if collab and collab.role == 'manager':
+        return True
+    return False
+
+async def is_collaborator(agent_id: str, user: models.User, db: Session) -> bool:
+    collab = db.query(models.AgentCollaborator).filter(models.AgentCollaborator.agent_id == agent_id, models.AgentCollaborator.user_id == user.id).first()
+    return collab is not None
 
 class ConnectionManager:
     def __init__(self):
@@ -195,22 +212,48 @@ async def root():
 
 @app.get("/api/agents")
 async def get_agents(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Return agents owned by user
-    user_agents = db.query(models.Agent).filter(models.Agent.owner_id == current_user.id).all()
-    
+    # Return agents owned by user OR shared with user
+    owned_agents = db.query(models.Agent).filter(models.Agent.owner_id == current_user.id).all()
+    collab_rows = db.query(models.AgentCollaborator).filter(models.AgentCollaborator.user_id == current_user.id).all()
+    collab_agent_ids = {c.agent_id for c in collab_rows}
+
     result = []
-    for agent in user_agents:
+
+    # Owned agents (owner role)
+    for agent in owned_agents:
         status = "ONLINE" if agent.id in manager.active_agents else "OFFLINE"
         metadata = manager.agent_metadata.get(agent.id, "Unknown")
         server_status = manager.agent_server_status.get(agent.id, "OFFLINE")
-        result.append({"id": agent.id, "name": agent.name, "status": status, "metadata": metadata, "server_status": server_status})
-    
+        result.append({"id": agent.id, "name": agent.name, "status": status, "metadata": metadata, "server_status": server_status, "role": "owner"})
+
+    # Shared agents
+    for agent_id in collab_agent_ids:
+        agent = db.query(models.Agent).filter(models.Agent.id == agent_id).first()
+        if not agent:
+            continue
+        # avoid duplicate if owned
+        if agent.owner_id == current_user.id:
+            continue
+        status = "ONLINE" if agent.id in manager.active_agents else "OFFLINE"
+        metadata = manager.agent_metadata.get(agent.id, "Unknown")
+        server_status = manager.agent_server_status.get(agent.id, "OFFLINE")
+        collab = next((c for c in collab_rows if c.agent_id == agent.id), None)
+        role = collab.role if collab else "viewer"
+        result.append({"id": agent.id, "name": agent.name, "status": status, "metadata": metadata, "server_status": server_status, "role": role})
+
     return result
 
 # --- Agent Control API ---
 
+class CollaboratorRequest(BaseModel):
+    username: str
+    role: Optional[str] = "viewer"
+
 @app.post("/api/agent/{agent_id}/start")
-async def start_server(agent_id: str):
+async def start_server(agent_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # permission: must be owner or manager
+    if not await has_manage_permission(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
     try:
         await manager.send_to_agent(agent_id, {
             "type": "START_SERVER",
@@ -220,8 +263,54 @@ async def start_server(agent_id: str):
     except Exception as e:
         return {"error": str(e)}
 
+@app.post("/api/agent/{agent_id}/collaborators")
+async def invite_collaborator(agent_id: str, req: CollaboratorRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # only owner can invite
+    if not await is_agent_owner(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Only owner can invite collaborators")
+
+    user = db.query(models.User).filter(models.User.username == req.username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    existing = db.query(models.AgentCollaborator).filter(models.AgentCollaborator.agent_id == agent_id, models.AgentCollaborator.user_id == user.id).first()
+    if existing:
+        existing.role = req.role or existing.role
+        db.add(existing)
+    else:
+        collab = models.AgentCollaborator(agent_id=agent_id, user_id=user.id, role=req.role or 'viewer')
+        db.add(collab)
+    db.commit()
+    return {"status": "invited", "user": user.username, "role": req.role}
+
+@app.get("/api/agent/{agent_id}/collaborators")
+async def list_collaborators(agent_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # only owner or collaborator can view
+    if not (await is_agent_owner(agent_id, current_user, db) or await is_collaborator(agent_id, current_user, db)):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    rows = db.query(models.AgentCollaborator).filter(models.AgentCollaborator.agent_id == agent_id).all()
+    result = []
+    for r in rows:
+        u = db.query(models.User).filter(models.User.id == r.user_id).first()
+        result.append({"id": r.user_id, "username": u.username if u else None, "role": r.role})
+    return result
+
+@app.delete("/api/agent/{agent_id}/collaborators/{user_id}")
+async def remove_collaborator(agent_id: str, user_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # only owner or manager can remove (managers can remove others, owner can remove anyone)
+    if not (await is_agent_owner(agent_id, current_user, db) or await has_manage_permission(agent_id, current_user, db)):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    row = db.query(models.AgentCollaborator).filter(models.AgentCollaborator.agent_id == agent_id, models.AgentCollaborator.user_id == user_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not a collaborator")
+    db.delete(row)
+    db.commit()
+    return {"status": "removed"}
+
 @app.post("/api/agent/{agent_id}/stop")
-async def stop_server(agent_id: str):
+async def stop_server(agent_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not await has_manage_permission(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
     try:
         await manager.send_to_agent(agent_id, {
             "type": "STOP_SERVER",
@@ -232,7 +321,9 @@ async def stop_server(agent_id: str):
         return {"error": str(e)}
 
 @app.post("/api/agent/{agent_id}/command")
-async def send_command(agent_id: str, req: CommandRequest):
+async def send_command(agent_id: str, req: CommandRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not await has_manage_permission(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
     try:
         await manager.send_to_agent(agent_id, {
             "type": "COMMAND",
@@ -281,7 +372,11 @@ async def get_versions(type: str, q: str = "", limit: int = 100):
     return []
 
 @app.post("/api/agent/{agent_id}/install")
-async def install_server(agent_id: str, payload: Dict[str, str]):
+async def install_server(agent_id: str, payload: Dict[str, str], current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # permission: must be owner or manager
+    if not await has_manage_permission(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # payload: { "type": "vanilla", "version": "1.20.4" }
     version = payload.get("version")
     server_type = payload.get("type")
@@ -354,8 +449,11 @@ async def search_mods(query: str, version: str = ""):
         return data.get("hits", [])
 
 @app.post("/api/agent/{agent_id}/mods")
-async def install_mod(agent_id: str, payload: Dict[str, str]):
+async def install_mod(agent_id: str, payload: Dict[str, str], current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     # payload: { "url": "...", "filename": "..." }
+    if not await has_manage_permission(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     url = payload.get("url")
     filename = payload.get("filename")
     
@@ -374,7 +472,9 @@ async def install_mod(agent_id: str, payload: Dict[str, str]):
 
 
 @app.post("/api/agent/{agent_id}/properties/fetch")
-async def fetch_properties(agent_id: str):
+async def fetch_properties(agent_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not await is_collaborator(agent_id, current_user, db) and not await is_agent_owner(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
     try:
         await manager.send_to_agent(agent_id, {
             "type": "READ_PROPERTIES",
@@ -385,7 +485,9 @@ async def fetch_properties(agent_id: str):
         return {"error": str(e)}
 
 @app.post("/api/agent/{agent_id}/properties/update")
-async def update_properties(agent_id: str, payload: Dict[str, str]):
+async def update_properties(agent_id: str, payload: Dict[str, str], current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not await has_manage_permission(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
     try:
         await manager.send_to_agent(agent_id, {
             "type": "WRITE_PROPERTIES",
