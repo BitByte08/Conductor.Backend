@@ -15,7 +15,27 @@ logger = logging.getLogger("ConductorBackend")
 # Create tables
 models.Base.metadata.create_all(bind=database.engine)
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
+
+# Configure CORS to allow the CDN/front-end origin (cd.bitworkspace.kr) and common dev origins
+origins = [
+    "https://cd.bitworkspace.kr",
+    "http://cd.bitworkspace.kr",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)"
 
 # Dependency
 def get_db():
