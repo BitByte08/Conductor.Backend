@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+python-multipart
+python-jose[cryptography]
+passlib[argon2]
+websockets
+httpx
