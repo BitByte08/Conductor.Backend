@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  backend:
+    build: .
+    image: conductor-backend:latest
+    container_name: conductor-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Persist the SQLite DB on the host so data survives container restarts
+      - ./conductor.db:/app/conductor.db
+      # Optional folder for app-level persistent files (logs, uploads, etc.)
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+# Useful commands:
+#  - Build & run:  docker compose up --build -d
+#  - View logs:     docker compose logs -f backend
+#  - Stop:          docker compose down
