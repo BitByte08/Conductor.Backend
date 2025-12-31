@@ -1,2 +1,5 @@
 venv
 __pycache__/
+
+# Local sqlite DB
+conductor.db
