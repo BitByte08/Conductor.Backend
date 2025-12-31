@@ -31,6 +31,10 @@ class ConnectionManager:
         self.active_agents: Dict[str, WebSocket] = {}
         # agent_id -> List[WebSocket] (Frontend clients watching this agent)
         self.active_clients: Dict[str, List[WebSocket]] = {}
+        # agent_id -> last seen metadata string
+        self.agent_metadata: Dict[str, str] = {}
+        # agent_id -> last server status (ONLINE/OFFLINE)
+        self.agent_server_status: Dict[str, str] = {}
 
     async def connect_agent(self, agent_id: str, websocket: WebSocket):
         await websocket.accept()
@@ -177,7 +181,9 @@ async def get_agents(current_user: models.User = Depends(get_current_user), db: 
     result = []
     for agent in user_agents:
         status = "ONLINE" if agent.id in manager.active_agents else "OFFLINE"
-        result.append({"id": agent.id, "name": agent.name, "status": status})
+        metadata = manager.agent_metadata.get(agent.id, "Unknown")
+        server_status = manager.agent_server_status.get(agent.id, "OFFLINE")
+        result.append({"id": agent.id, "name": agent.name, "status": status, "metadata": metadata, "server_status": server_status})
     
     return result
 
@@ -223,19 +229,35 @@ import httpx
 # ... existing imports ...
 
 @app.get("/api/metadata/versions/{type}")
-async def get_versions(type: str):
+async def get_versions(type: str, q: str = "", limit: int = 100):
+    """Return versions for given type. Optional query `q` filters versions (substring match)."""
+    q = (q or "").strip()
+    limit = max(1, min(limit, 1000))
+
     if type == "vanilla":
         async with httpx.AsyncClient() as client:
             resp = await client.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
             data = resp.json()
-            # Return release versions only for brevity
-            versions = [v for v in data["versions"] if v["type"] == "release"]
-            return versions[:20] # Return top 20
+            # Return release versions only
+            versions = [v["id"] for v in data["versions"] if v["type"] == "release"]
+            if q:
+                filtered = [v for v in versions if q in v]
+            else:
+                filtered = versions[::-1]  # newest first
+            return filtered[:limit]
+
     elif type == "paper":
         async with httpx.AsyncClient() as client:
+            # Paper lists versions, return them (newest first)
             resp = await client.get("https://api.papermc.io/v2/projects/paper")
             data = resp.json()
-            return data["versions"][-20:] # Return last 20 versions
+            versions = data.get("versions", [])
+            if q:
+                filtered = [v for v in versions if q in v]
+            else:
+                filtered = versions[::-1]
+            return filtered[:limit]
+
     return []
 
 @app.post("/api/agent/{agent_id}/install")
@@ -378,6 +400,20 @@ async def ws_agent(websocket: WebSocket, agent_id: str, db: Session = Depends(ge
     try:
         while True:
             data = await websocket.receive_text()
+            # If this is a JSON heartbeat, extract metadata and status for dashboard
+            try:
+                obj = json.loads(data)
+                t = obj.get("type")
+                payload = obj.get("payload") or {}
+                if t == "HEARTBEAT":
+                    md = payload.get("metadata")
+                    st = payload.get("server_status")
+                    if md:
+                        self.agent_metadata[agent_id] = md
+                    if st:
+                        self.agent_server_status[agent_id] = st
+            except Exception:
+                pass
             # Broadcast everything from agent to clients (Logs, Heartbeats)
             await manager.broadcast_to_clients(agent_id, data)
     except WebSocketDisconnect:
@@ -386,6 +422,7 @@ async def ws_agent(websocket: WebSocket, agent_id: str, db: Session = Depends(ge
         logger.error(f"Agent WS error: {e}")
     finally:
         await manager.disconnect_agent(agent_id)
+
 
 @app.websocket("/ws/client/{agent_id}")
 async def ws_client(websocket: WebSocket, agent_id: str):
