@@ -23,6 +23,8 @@ app = FastAPI()
 origins = [
     "https://cd.bitworkspace.kr",
     "http://cd.bitworkspace.kr",
+    "https://conductor.bitbyte08.workers.dev",
+    "http://conductor.bitbyte08.workers.dev",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
