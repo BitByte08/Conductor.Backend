@@ -418,6 +418,8 @@ async def install_server(agent_id: str, payload: Dict[str, str], current_user: m
     # payload: { "type": "vanilla", "version": "1.20.4" }
     version = payload.get("version")
     server_type = payload.get("type")
+    loader_version = payload.get("loader")
+    installer_version = payload.get("installer")
     
     url = ""
     filename = "server.jar"
@@ -453,6 +455,38 @@ async def install_server(agent_id: str, payload: Dict[str, str], current_user: m
             filename = f"paper-{version}-{latest_build}.jar"
             url = f"https://api.papermc.io/v2/projects/paper/versions/{version}/builds/{latest_build}/downloads/{filename}"
             filename = "server.jar" # Rename to generic for simplicity
+
+    elif server_type == "fabric":
+        # Fabric server jar: https://meta.fabricmc.net/v2/versions/loader/{mc}/{loader}/{installer}/server/jar
+        mc_version = version
+        if not mc_version:
+            return {"error": "version (Minecraft) is required for fabric"}
+        async with httpx.AsyncClient() as client:
+            # Get loader+installer combos for this MC version
+            resp = await client.get(f"https://meta.fabricmc.net/v2/versions/loader/{mc_version}")
+            if resp.status_code != 200:
+                return {"error": f"Fabric meta unavailable for {mc_version}"}
+            combos = resp.json() or []
+            chosen = None
+            for c in combos:
+                if c.get("stable"):
+                    chosen = c
+                    break
+            if not chosen and combos:
+                chosen = combos[0]
+            if not chosen:
+                return {"error": f"No fabric loader found for {mc_version}"}
+
+            loader_ver = loader_version or chosen.get("loader", {}).get("version")
+            installer_ver = installer_version or chosen.get("installer", {}).get("version")
+            if not loader_ver or not installer_ver:
+                return {"error": "Failed to resolve fabric loader/installer versions"}
+
+            url = f"https://meta.fabricmc.net/v2/versions/loader/{mc_version}/{loader_ver}/{installer_ver}/server/jar"
+            filename = "server.jar"
+            # Optionally override server_type/version metadata for dashboard
+            server_type = "fabric"
+            version = f"{mc_version}-{loader_ver}"
 
     if not url:
         return {"error": "Could not resolve download URL"}
@@ -506,6 +540,40 @@ async def install_mod(agent_id: str, payload: Dict[str, str], current_user: mode
         "payload": { "url": url, "filename": filename }
     })
     return {"status": "installing_mod", "file": filename}
+
+
+@app.post("/api/agent/{agent_id}/mods/delete")
+async def delete_mod(agent_id: str, payload: Dict[str, str], current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not await has_manage_permission(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    filename = payload.get("filename")
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename required")
+    if agent_id not in manager.active_agents:
+        return {"error": "Agent not connected"}
+    await manager.send_to_agent(agent_id, {
+        "type": "DELETE_MOD",
+        "payload": { "filename": filename }
+    })
+    return {"status": "delete_requested", "file": filename}
+
+
+@app.post("/api/agent/{agent_id}/mods/toggle")
+async def toggle_mod(agent_id: str, payload: Dict[str, str], current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not await has_manage_permission(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    filename = payload.get("filename")
+    enabled = payload.get("enabled")
+    if filename is None or enabled is None:
+        raise HTTPException(status_code=400, detail="filename and enabled required")
+    enabled_bool = str(enabled).lower() in ["1", "true", "yes", "on"]
+    if agent_id not in manager.active_agents:
+        return {"error": "Agent not connected"}
+    await manager.send_to_agent(agent_id, {
+        "type": "TOGGLE_MOD",
+        "payload": { "filename": filename, "enabled": enabled_bool }
+    })
+    return {"status": "toggle_requested", "file": filename, "enabled": enabled_bool}
 
 
 @app.get("/api/agent/{agent_id}/mods/list")
