@@ -508,6 +508,24 @@ async def install_mod(agent_id: str, payload: Dict[str, str], current_user: mode
     return {"status": "installing_mod", "file": filename}
 
 
+@app.get("/api/agent/{agent_id}/mods/list")
+async def list_mods(agent_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # allow owners or collaborators to view
+    if not (await is_agent_owner(agent_id, current_user, db) or await is_collaborator(agent_id, current_user, db)):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    if agent_id not in manager.active_agents:
+        raise HTTPException(status_code=400, detail="Agent not connected")
+
+    try:
+        await manager.send_to_agent(agent_id, {
+            "type": "LIST_MODS"
+        })
+    except Exception as e:
+        return {"error": str(e)}
+    return {"status": "requested"}
+
+
 
 @app.post("/api/agent/{agent_id}/properties/fetch")
 async def fetch_properties(agent_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
