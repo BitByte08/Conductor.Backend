@@ -387,24 +387,31 @@ async def get_versions(type: str, q: str = "", limit: int = 100):
         async with httpx.AsyncClient() as client:
             resp = await client.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
             data = resp.json()
-            # Return release versions only
             versions = [v["id"] for v in data["versions"] if v["type"] == "release"]
-            if q:
-                filtered = [v for v in versions if q in v]
-            else:
-                filtered = versions[::-1]  # newest first
+            filtered = [v for v in (versions[::-1] if not q else versions) if (not q or q in v)]
             return filtered[:limit]
 
-    elif type == "paper":
+    if type == "paper":
         async with httpx.AsyncClient() as client:
-            # Paper lists versions, return them (newest first)
             resp = await client.get("https://api.papermc.io/v2/projects/paper")
             data = resp.json()
             versions = data.get("versions", [])
-            if q:
-                filtered = [v for v in versions if q in v]
-            else:
-                filtered = versions[::-1]
+            filtered = [v for v in (versions[::-1] if not q else versions) if (not q or q in v)]
+            return filtered[:limit]
+
+    if type == "fabric":
+        # Fabric uses Minecraft game versions; use Fabric meta
+        async with httpx.AsyncClient() as client:
+            resp = await client.get("https://meta.fabricmc.net/v2/versions/game")
+            data = resp.json()
+            # structure: [{"version": "1.20.4", "stable": true}, ...]
+            versions = [item.get("version") for item in data if item.get("stable")]
+            # if none marked stable, fall back to all versions
+            if not versions:
+                versions = [item.get("version") for item in data]
+            versions = [v for v in versions if v]
+            filtered = [v for v in (versions if q else versions) if (not q or q in v)]
+            # keep newest first (data already desc)
             return filtered[:limit]
 
     return []
