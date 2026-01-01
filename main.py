@@ -549,9 +549,9 @@ async def ws_agent(websocket: WebSocket, agent_id: str, db: Session = Depends(ge
                     md = payload.get("metadata")
                     st = payload.get("server_status")
                     if md:
-                        self.agent_metadata[agent_id] = md
+                        manager.agent_metadata[agent_id] = md
                     if st:
-                        self.agent_server_status[agent_id] = st
+                        manager.agent_server_status[agent_id] = st
             except Exception:
                 pass
             # Broadcast everything from agent to clients (Logs, Heartbeats)
