@@ -464,15 +464,32 @@ async def install_server(agent_id: str, payload: Dict[str, str], current_user: m
             filename = "server.jar" # Rename to generic for simplicity
 
     elif server_type == "fabric":
-        # Fabric requires special handling - for now, we'll provide the installer jar
-        # The agent/user needs to run the installer manually or we use a wrapper script
-        # For MVP, return the installer URL and let user know setup is manual
+        # Fabric server: https://meta.fabricmc.net/v2/versions/loader/{mc}/{loader}/{installer}/server/jar
         mc_version = version
         if not mc_version:
             return {"error": "version (Minecraft) is required for fabric"}
         
         async with httpx.AsyncClient() as client:
-            # Get stable installer version
+            # Get latest stable loader version for this MC version
+            resp = await client.get(f"https://meta.fabricmc.net/v2/versions/loader/{mc_version}")
+            if resp.status_code != 200:
+                return {"error": f"Fabric meta unavailable for {mc_version}"}
+            loaders = resp.json() or []
+            chosen_loader = None
+            for l in loaders:
+                if l.get("loader", {}).get("stable"):
+                    chosen_loader = l
+                    break
+            if not chosen_loader and loaders:
+                chosen_loader = loaders[0]
+            if not chosen_loader:
+                return {"error": f"No fabric loader found for {mc_version}"}
+
+            loader_ver = chosen_loader.get("loader", {}).get("version")
+            if not loader_ver:
+                return {"error": "Failed to resolve fabric loader version"}
+            
+            # Get latest stable installer version
             resp = await client.get("https://meta.fabricmc.net/v2/versions/installer")
             if resp.status_code != 200:
                 return {"error": "Fabric installer meta unavailable"}
@@ -487,21 +504,11 @@ async def install_server(agent_id: str, payload: Dict[str, str], current_user: m
             if not installer_ver:
                 return {"error": "Failed to resolve fabric installer version"}
 
-            # For now, send vanilla jar and mark as fabric in metadata
-            # Proper Fabric support requires running the installer, which is complex in agent environment
-            # Fallback: use latest vanilla jar as base
-            manifest_resp = await client.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
-            manifest = manifest_resp.json()
-            version_url = next((v["url"] for v in manifest["versions"] if v["id"] == mc_version), None)
-            if version_url:
-                v_resp = await client.get(version_url)
-                v_data = v_resp.json()
-                url = v_data["downloads"]["server"]["url"]
-                filename = "server.jar"
-                server_type = "fabric"
-                version = f"{mc_version}-loader"
-            else:
-                return {"error": f"Fabric: Could not find vanilla server for {mc_version}"}
+            # Fabric executable server jar
+            url = f"https://meta.fabricmc.net/v2/versions/loader/{mc_version}/{loader_ver}/{installer_ver}/server/jar"
+            filename = "server.jar"
+            server_type = "fabric"
+            version = f"{mc_version}-loader.{loader_ver}"
 
     if not url:
         return {"error": "Could not resolve download URL"}
