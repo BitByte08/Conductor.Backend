@@ -309,6 +309,25 @@ async def remove_collaborator(agent_id: str, user_id: int, current_user: models.
     db.commit()
     return {"status": "removed"}
 
+@app.delete("/api/agent/{agent_id}")
+async def delete_agent(agent_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # only owner can delete
+    if not await is_agent_owner(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Only owner can delete agent")
+    
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Delete all collaborators first
+    db.query(models.AgentCollaborator).filter(models.AgentCollaborator.agent_id == agent_id).delete()
+    
+    # Delete the agent
+    db.delete(agent)
+    db.commit()
+    
+    return {"status": "deleted"}
+
 @app.post("/api/agent/{agent_id}/stop")
 async def stop_server(agent_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not await has_manage_permission(agent_id, current_user, db):
