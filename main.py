@@ -542,6 +542,63 @@ async def search_mods(query: str, version: str = ""):
         data = resp.json()
         return data.get("hits", [])
 
+@app.post("/api/mods/resolve")
+async def resolve_mod_download(payload: Dict[str, str]):
+    """Resolve a Modrinth project to a download URL matching loader and game version."""
+    project_id = payload.get("project_id") or payload.get("projectId") or payload.get("id") or payload.get("slug")
+    loader = payload.get("loader")
+    game_version = payload.get("game_version") or payload.get("gameVersion")
+
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project_id is required")
+
+    async with httpx.AsyncClient() as client:
+        def build_url(loader_val: str | None, game_val: str | None) -> str:
+            params = {}
+            if loader_val:
+                params["loaders"] = json.dumps([loader_val])
+            if game_val:
+                params["game_versions"] = json.dumps([game_val])
+            return httpx.URL(f"https://api.modrinth.com/v2/project/{project_id}/version", params=params)
+
+        candidate_urls = [
+            build_url(loader, game_version),
+            build_url(loader, None),
+            build_url(None, game_version),
+            build_url(None, None),
+        ]
+
+        versions: list[dict] = []
+        for url in candidate_urls:
+            try:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 0:
+                    versions = data
+                    break
+            except Exception:
+                continue
+
+        if not versions:
+            raise HTTPException(status_code=404, detail="No matching version found for loader/game version")
+
+        chosen = versions[0]
+        files = chosen.get("files") or []
+        primary = None
+        for f in files:
+            if f.get("primary"):
+                primary = f
+                break
+        if not primary and files:
+            primary = files[0]
+
+        if not primary or not primary.get("url") or not primary.get("filename"):
+            raise HTTPException(status_code=404, detail="No downloadable file found")
+
+        return {"url": primary.get("url"), "filename": primary.get("filename")}
+
 @app.post("/api/agent/{agent_id}/mods")
 async def install_mod(agent_id: str, payload: Dict[str, str], current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     # payload: { "url": "...", "filename": "..." }
