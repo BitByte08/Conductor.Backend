@@ -123,8 +123,10 @@ class ConnectionManager:
 
     async def send_to_agent(self, agent_id: str, message: dict):
         if agent_id in self.active_agents:
+            logger.info(f"Sending message to agent {agent_id}: {message.get('type')}")
             await self.active_agents[agent_id].send_text(json.dumps(message))
         else:
+            logger.error(f"Cannot send to agent {agent_id}: not connected")
             raise Exception("Agent not connected")
 
 manager = ConnectionManager()
@@ -510,15 +512,19 @@ async def install_mod(agent_id: str, payload: Dict[str, str], current_user: mode
 
 @app.post("/api/agent/{agent_id}/properties/fetch")
 async def fetch_properties(agent_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Properties fetch requested for agent {agent_id} by user {current_user.username}")
     if not await is_collaborator(agent_id, current_user, db) and not await is_agent_owner(agent_id, current_user, db):
+        logger.warning(f"Permission denied for properties fetch: agent {agent_id}, user {current_user.username}")
         raise HTTPException(status_code=403, detail="Permission denied")
     try:
+        logger.info(f"Sending READ_PROPERTIES to agent {agent_id}")
         await manager.send_to_agent(agent_id, {
-            "type": "READ_PROPERTIES",
-            "payload": {}
+            "type": "READ_PROPERTIES"
         })
+        logger.info(f"READ_PROPERTIES sent successfully to agent {agent_id}")
         return {"status": "requested"}
     except Exception as e:
+        logger.error(f"Failed to send READ_PROPERTIES to agent {agent_id}: {e}")
         return {"error": str(e)}
 
 @app.post("/api/agent/{agent_id}/properties/update")
