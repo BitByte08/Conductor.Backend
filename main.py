@@ -322,6 +322,22 @@ async def stop_server(agent_id: str, current_user: models.User = Depends(get_cur
     except Exception as e:
         return {"error": str(e)}
 
+@app.post("/api/agent/{agent_id}/config")
+async def update_config(agent_id: str, payload: Dict[str, str], current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not await has_manage_permission(agent_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    ram_mb = payload.get("ram_mb")
+    if not ram_mb:
+        raise HTTPException(status_code=400, detail="ram_mb required")
+    try:
+        await manager.send_to_agent(agent_id, {
+            "type": "UPDATE_CONFIG",
+            "payload": { "ram_mb": ram_mb }
+        })
+        return {"status": "sent"}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.post("/api/agent/{agent_id}/command")
 async def send_command(agent_id: str, req: CommandRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not await has_manage_permission(agent_id, current_user, db):
