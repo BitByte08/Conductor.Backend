@@ -336,8 +336,7 @@ async def stop_server(agent_id: str, current_user: models.User = Depends(get_cur
         raise HTTPException(status_code=403, detail="Permission denied")
     try:
         await manager.send_to_agent(agent_id, {
-            "type": "STOP_SERVER",
-            "payload": {}
+            "type": "STOP_SERVER"
         })
         return {"status": "sent"}
     except Exception as e:
